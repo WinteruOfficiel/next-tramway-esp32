@@ -4,9 +4,18 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-25.11";
     rust-overlay.url = "github:oxalica/rust-overlay";
+
+    nixvim = {
+      url  = "github:nix-community/nixvim?ref=nixos-25.11";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    nixvim-config = {
+      url = "path:/home/winteru/Documents/nixvim";
+    };
   };
 
-  outputs = { nixpkgs, rust-overlay, ... }:
+  outputs = { nixpkgs, nixvim, nixvim-config, rust-overlay, ... }:
   let
     allSystems = [
       "x86_64-linux"
@@ -27,9 +36,19 @@
           "riscv32imc-unknown-none-elf"
         ];
       };
+        nixvimPkgs = nixvim.legacyPackages.${system};
+        base = nixvim-config.nixvimModules.base { inherit pkgs; };
+        nvim = nixvimPkgs.makeNixvimWithModule {
+            inherit system;
+            module = nixpkgs.lib.recursiveUpdate base {
+                # Extend de la config de base 
+                plugins.lsp.enable = true;
+            };
+        };
     in {
       default = pkgs.mkShell {
         packages = with pkgs; [
+          nvim
           # Rust
           rust
           cargo-binutils
