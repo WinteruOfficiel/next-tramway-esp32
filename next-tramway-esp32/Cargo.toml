@@ -46,6 +46,7 @@ esp-backtrace = { version = "0.18.1", features = [
   "println",
 ]}
 embassy-sync = "0.7.2"
+heapless = "0.9.2"
 
 
 [profile.dev]

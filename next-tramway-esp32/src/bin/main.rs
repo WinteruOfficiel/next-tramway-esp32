@@ -7,6 +7,8 @@ use esp_hal::{Blocking, clock::CpuClock, i2c::master::I2c, time::Rate, timer::ti
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 
+use core::fmt::Write;
+
 esp_bootloader_esp_idf::esp_app_desc!();
 
 static I2C_BUS: Mutex<CriticalSectionRawMutex, Option<I2c<'static, Blocking>>> =
@@ -61,20 +63,21 @@ async fn main(spawner: Spawner) {
     Timer::after(Duration::from_millis(50)).await;
     scan_i2c_bus().await;
 
-    let lcd = Lcd::new(&I2C_BUS);
-    lcd.set_4_bits_mode().await;
-    lcd.send(0x28, 0).await; // function set
-    lcd.send(0x0C, 0).await; // display ON
-    lcd.send(0x01, 0).await; // clear
-    Timer::after(Duration::from_millis(2)).await;
-    lcd.send(0x06, 0).await; // entry mode
+    let mut lcd = Lcd::new(&I2C_BUS);
+    lcd.init().await;
+    lcd.print("Estrogen").await;
+    lcd.clear().await;
 
-    lcd.send(b'E', 1).await;
+    let mut buf = [0u8; 16];
+    let mut s = heapless::String::<16>::new();
 
-
-
-
+    let mut counter: i32 = 0;
     loop {
+        lcd.clear().await;
+        s.clear();
+        write!(&mut s, "{}", counter).unwrap();
+        lcd.print(&s).await;
+        counter += 1;
         Timer::after(Duration::from_secs(1)).await;
     }
 }
