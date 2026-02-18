@@ -43,6 +43,13 @@
             module = nixpkgs.lib.recursiveUpdate base {
                 # Extend de la config de base 
                 plugins.lsp.enable = true;
+                plugins.rustaceanvim.settings.server.default_settings."rust-analyzer".check = {
+                    command = "clippy";
+                    extraArgs = [
+                        "--no-default-features"
+                    ];
+                    allTargets = false;
+                };
             };
         };
     in {

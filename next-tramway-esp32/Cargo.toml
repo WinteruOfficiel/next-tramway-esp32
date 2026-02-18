@@ -9,16 +9,16 @@ name = "next-tramway-esp32"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "1.0.0", features = ["esp32h2", "unstable"] }
+esp-hal = { version = "1.0.0", features = ["esp32c6", "unstable"] }
 
 esp-rtos = { version = "0.2.0", features = [
   "embassy",
   "esp-alloc",
   "esp-radio",
-  "esp32h2",
+  "esp32c6",
 ] }
 
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32h2"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c6"] }
 
 bt-hci = "0.6.0"
 embassy-executor = { version = "0.9.1", features = ["arch-riscv32"] }
@@ -29,24 +29,53 @@ esp-alloc = "0.9.0"
 esp-radio = { version = "0.17.0", features = [
   "ble",
   "esp-alloc",
-  "esp32h2",
+  "esp32c6",
   "unstable",
+  "smoltcp",
+  "wifi",
+  "log-04"
 ] }
 trouble-host = { version = "0.5.0", features = ["gatt"] }
+
+smoltcp = { version = "0.12.0", default-features = false, features = [
+  "medium-ethernet",
+  "multicast",
+  "proto-dhcpv4",
+  "proto-dns",
+  "proto-ipv4",
+  "socket-dns",
+  "socket-icmp",
+  "socket-raw",
+  "socket-tcp",
+  "socket-udp",
+] }
 
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
 esp-println = { version = "0.16.1", features = [
-  "esp32h2",
+  "esp32c6",
   "log-04"
 ]}
 esp-backtrace = { version = "0.18.1", features = [
-  "esp32h2",
+  "esp32c6",
   "panic-handler",
   "println",
 ]}
 embassy-sync = "0.7.2"
 heapless = "0.9.2"
+embassy-net = { version = "0.8.0", features = [
+    "dhcpv4",
+    "medium-ethernet",
+    "tcp",
+    "dns",
+]}
+rust-mqtt = { version ="0.4.1", features = [
+  "v5",
+]}
+defmt = "1.0.1"
+esp-wifi-sys = { version = "0.8.1", features = [
+  "esp32c6"
+]}
 
 
 [profile.dev]
