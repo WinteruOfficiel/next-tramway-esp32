@@ -2,6 +2,72 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Timer, Duration};
 use esp_hal::{Blocking, i2c::master::I2c};
 
+use crate::display::{TramDirectionState, TramDisplay, UiState};
+use core::fmt::Write;
+
+pub struct LcdRenderer<'a> {
+    lcd_screen: Lcd<'a>,
+    current_line: usize,
+    current_direction: usize,
+}
+
+impl<'a> LcdRenderer<'a> {
+    pub fn new(lcd_screen: Lcd<'a>) -> Self {
+        LcdRenderer { 
+            lcd_screen,
+            current_line: 0,
+            current_direction: 0 
+        }
+    }
+
+    fn advance(&mut self, state: &UiState) {
+        let lines = &state.lines;
+        if lines.is_empty() {
+            return;
+        }
+
+        self.current_direction += 1;
+
+        let line = &lines[self.current_line];
+        if self.current_direction >= line.directions.len() {
+            self.current_direction = 0;
+            self.current_line = (self.current_line + 1) % lines.len();
+        }
+    }
+
+    async fn render_line(&mut self, line: &heapless::String<16>,tram_direction_state: &TramDirectionState) {
+        self.lcd_screen.clear().await;
+        self.lcd_screen.print(line).await;
+        self.lcd_screen.set_cursor(1, 0).await;
+
+        if tram_direction_state.next_passages.is_empty() {
+            self.lcd_screen.print("Pas de passage...").await;
+        } else {
+            let mut buf: heapless::String<20> = heapless::String::new();
+            for (i, next) in tram_direction_state.next_passages.iter().enumerate() {
+                buf.clear();
+                let next_arrival = next.relative_arrival;
+                let _ = write!(buf, "{} {}", next.destination, next.relative_arrival);
+                self.lcd_screen.set_cursor(i as u8 + 1, 0).await;
+                self.lcd_screen.print(&buf).await;
+            }
+        }
+    }
+}
+
+impl TramDisplay for LcdRenderer<'_> {
+    async fn render<'b>(&'b mut self, state: &'b crate::display::UiState) {
+        if state.lines.is_empty() {
+            return;
+        }
+
+        let Some(line) = state.lines.get(self.current_line) else { return };
+        if let Some(directions) = line.directions.get(self.current_direction) {
+            self.render_line(&line.line,directions).await;
+        }
+    }
+}
+
 pub enum LcdGeometry {
     L1602,
     L2004,
@@ -32,28 +98,32 @@ impl<'a> Lcd<'a> {
 
     pub fn new(
         bus: &'a Mutex<CriticalSectionRawMutex, Option<I2c<'static, Blocking>>>,
+        geom: LcdGeometry
     ) -> Self {
-        Self { bus, geom: LcdGeometry::L1602, curr_row: 0, curr_col: 0 }
+        Self { bus, geom, curr_row: 0, curr_col: 0 }
     }
 
     pub async fn init(&self) {
         self.set_4_bits_mode().await;
-        self.send(0x28, 0).await; // function set
-        self.send(0x0C, 0).await; // display ON
+        Timer::after(Duration::from_millis(5)).await;
+
+        self.send(0x28, 0).await; // 4-bit, 2-line
+        self.send(0x08, 0).await; // display OFF
         self.send(0x01, 0).await; // clear
         Timer::after(Duration::from_millis(2)).await;
         self.send(0x06, 0).await; // entry mode
+        self.send(0x0C, 0).await; // display ON
     }
 
     fn get_size_and_offset(&self) -> (u8, u8, &[u8]) {
         match self.geom {
             LcdGeometry::L1602 => (1, 15, &[0x00, 0x40][..]),
-            LcdGeometry::L2004 => todo!(),
+            LcdGeometry::L2004 => (3, 19, &[0x00, 0x40, 0x14, 0x54]),
         }
     }
 
-    pub async fn set_cursor(&mut self, mut row:  u8, mut col: u8) {
-        let (max_row, max_col, offsets) = self.get_size_and_offset();  
+    pub async fn set_cursor(&mut self, row:  u8, col: u8) {
+        let (_max_row, _max_col, offsets) = self.get_size_and_offset();  
         //TODO: check bounds
         self.command(lcd_commands::LCD_SETDDRAMADDR | (col + offsets[row as usize])).await;
         self.curr_row = row;
@@ -126,5 +196,6 @@ impl<'a> Lcd<'a> {
         self.write_4_bits(0x03 << 4).await;
         Timer::after(Duration::from_micros(150)).await;
         self.write_4_bits(0x02 << 4).await;
+        Timer::after(Duration::from_millis(1)).await;
     }
 }

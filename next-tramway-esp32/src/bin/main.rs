@@ -2,12 +2,12 @@
 #![no_main]
 
 use core::str::FromStr;
-use heapless::String;
-use next_tramway_esp32::lcd::Lcd;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, channel};
+use heapless::{String, Vec};
+use next_tramway_esp32::{display::{TramDisplay, TramNextPassage, UiCommand, UiState, apply_ui_command}, lcd::{Lcd, LcdRenderer}};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::{self, Channel}, mutex::Mutex};
 use esp_hal::{Blocking, clock::CpuClock, i2c::master::I2c, time::Rate, timer::timg::TimerGroup};
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, Ticker};
 use esp_radio::{
     Controller,
     wifi::{
@@ -42,16 +42,24 @@ use rust_mqtt::{
     }
 };
 use static_cell::StaticCell;
+use embassy_futures::select::{select, Either};
 
 // When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
         #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
+        let x = STATIC_CELL.uninit().write($val);
         x
     }};
 }
+
+fn str_to_msg(s: &str) -> heapless::String<64> {
+    let mut msg = heapless::String::new();
+    let _ = msg.push_str(s);
+    msg
+}
+
 
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
@@ -75,7 +83,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static I2C_BUS: Mutex<CriticalSectionRawMutex, Option<I2c<'static, Blocking>>> =
     Mutex::new(None);
 
-static MQTT_TO_LCD: channel::Channel<CriticalSectionRawMutex, heapless::String<32>, 4> = channel::Channel::new();
+static MQTT_TO_LCD: channel::Channel<CriticalSectionRawMutex, heapless::String<64>, 4> = channel::Channel::new();
+static UI_CH: Channel<CriticalSectionRawMutex,  UiCommand,8> = Channel::new();
 
     
 
@@ -101,9 +110,6 @@ async fn scan_i2c_bus() {
     esp_println::println!("Scan done.");
 }
 
-
-
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -122,6 +128,7 @@ async fn main(spawner: Spawner) {
 
     esp_println::logger::init_logger_from_env();
     esp_println::println!("Embassy init !");
+    spawner.spawn(lcd());
 
     let i2c_bus = esp_hal::i2c::master::I2c::new(
         peripherals.I2C0,
@@ -133,14 +140,16 @@ async fn main(spawner: Spawner) {
 
     I2C_BUS.lock().await.replace(i2c_bus);
     esp_println::println!("I2C Bus init !");
-
+    MQTT_TO_LCD.send(str_to_msg("I2C Bus initialized")).await;
 
     let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
     esp_println::println!("radio controlller init !");
+    MQTT_TO_LCD.send(str_to_msg("radio controlller init !")).await;
 
     let (controller, interfaces) =
-        esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
+        esp_radio::wifi::new(esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
     esp_println::println!("Wifi controlller init !");
+    MQTT_TO_LCD.send(str_to_msg("Wifi controlller init !")).await;
 
     let wifi_interface = interfaces.sta;
 
@@ -163,24 +172,44 @@ async fn main(spawner: Spawner) {
     spawner.spawn(net_task(runner)).ok();
     spawner.spawn(mqtt(stack)).ok();
 
+    let lcd = Lcd::new(&I2C_BUS, next_tramway_esp32::lcd::LcdGeometry::L2004);
+    lcd.init().await;
+    spawner.spawn(renderer(LcdRenderer::new(lcd)));
+
     let stats: HeapStats = esp_alloc::HEAP.stats();
     esp_println::println!("{}", stats);
 
     
     Timer::after(Duration::from_millis(50)).await;
     scan_i2c_bus().await;
+}
 
-    let mut lcd = Lcd::new(&I2C_BUS);
-    lcd.init().await;
-    lcd.print("Estrogen\nUwu").await;
 
+#[embassy_executor::task]
+async fn lcd() {
+    // let mut lcd = Lcd::new(&I2C_BUS, next_tramway_esp32::lcd::LcdGeometry::L2004);
+    // lcd.init().await;
     loop {
         let msg = MQTT_TO_LCD.receive().await;
-        lcd.clear().await;
-        lcd.print(&msg).await;
+        // lcd.clear().await;
+        // lcd.print(&msg).await;
     }
 }
 
+#[embassy_executor::task]
+async fn renderer(mut display: LcdRenderer<'static>) {
+
+    let mut state = UiState {
+        lines: heapless::Vec::new(),
+    };
+    esp_println::println!("Renderer ready !");
+    loop {
+        let cmd = UI_CH.receive().await;
+        esp_println::println!("Applying ui_command");
+        apply_ui_command(&mut state, cmd);
+        display.render(&state).await;
+    }
+}
 
 #[embassy_executor::task]
 async fn connection(mut controller: WifiController<'static>) {
@@ -192,6 +221,7 @@ async fn connection(mut controller: WifiController<'static>) {
         if esp_radio::wifi::sta_state() == WifiStaState::Connected {
             // wait until we're no longer connected
             controller.wait_for_event(WifiEvent::StaDisconnected).await;
+            esp_println::println!("Disconnected");
             Timer::after(Duration::from_millis(5000)).await
         }
         if !matches!(controller.is_started(), Ok(true)) {
@@ -206,6 +236,7 @@ async fn connection(mut controller: WifiController<'static>) {
             esp_println::println!("Wifi started!");
 
             esp_println::println!("Scan");
+            MQTT_TO_LCD.send(str_to_msg("Scanning wifi...")).await;
             let scan_config = ScanConfig::default().with_max(1).with_ssid(SSID);
             let result = controller
                 .scan_with_config_async(scan_config)
@@ -216,11 +247,15 @@ async fn connection(mut controller: WifiController<'static>) {
             }
         }
         esp_println::println!("About to connect...");
+        MQTT_TO_LCD.send(str_to_msg("About to connect...")).await;
     let stats: HeapStats = esp_alloc::HEAP.stats();
     esp_println::println!("{}", stats);
 
         match controller.connect_async().await {
-            Ok(_) => esp_println::println!("Wifi connected!"),
+            Ok(_) => { 
+                esp_println::println!("Wifi connected!");
+                MQTT_TO_LCD.send(str_to_msg("Wifi connected !")).await;
+            },
             Err(e) => {
                 esp_println::println!("Failed to connect to wifi: {e:?}");
                 Timer::after(Duration::from_millis(500)).await
@@ -245,6 +280,7 @@ async fn mqtt(stack: embassy_net::Stack<'static>) {
 
     // TODO: Shouldn't be there
     esp_println::println!("Waiting to get IP address...");
+    MQTT_TO_LCD.send(str_to_msg("Waiting to get IP address...")).await;
     loop {
         if let Some(config) = stack.config_v4() {
             esp_println::println!("Got IP: {}", config.address);
@@ -289,13 +325,15 @@ async fn mqtt(stack: embassy_net::Stack<'static>) {
     match mqtt_client.connect(socket, &connect_options, Some(MqttString::try_from(MQTT_CLIENT_ID).unwrap())).await {
         Ok(c) => {
             esp_println::println!("Connected to server: {:?}", c);
+            MQTT_TO_LCD.send(str_to_msg("Connected to MQTT server !")).await;
             esp_println::println!("{:?}", mqtt_client.client_config());
             esp_println::println!("{:?}", mqtt_client.server_config());
             esp_println::println!("{:?}", mqtt_client.shared_config());
             esp_println::println!("{:?}", mqtt_client.session());
         },
         Err(e) => {
-            esp_println::println!("Failed to connect to server {:?}", e)
+            esp_println::println!("Failed to connect to server {:?}", e);
+            MQTT_TO_LCD.send(str_to_msg("Failed to connect to MQTT server !")).await;
         },
     }
     
@@ -306,33 +344,70 @@ async fn mqtt(stack: embassy_net::Stack<'static>) {
         qos: rust_mqtt::types::QoS::ExactlyOnce 
 
     };
-    let s = MqttString::from_slice("test").unwrap();
+    let s = MqttString::from_slice("next-tramway/line/TramC/1").unwrap();
     let topic = unsafe {
         TopicName::new_unchecked(s)
     };
     match mqtt_client.subscribe(topic.into(), sub_options).await {
-        Ok(_) => esp_println::println!("Sent Subscribe"),
+        Ok(_) => esp_println::println!("Successfully subscribed !"),
         Err(e) => {
             esp_println::println!("Failed to subscribe: {:?}", e);
             return;
         }
     };
+
+    let mut ticker = Ticker::every(Duration::from_secs(KEEP_ALIVE_SECS as u64 / 2));
     // loop MQTT
     loop {
-        match mqtt_client.poll().await {
-            Ok(Event::Publish(p)) => {
-                if let Ok(text) = core::str::from_utf8(p.message.as_ref()) {
-                    let mut s: String<32> = String::new();
-                    let _ = s.push_str(text);
-                    MQTT_TO_LCD.send(s).await;
+        match select(mqtt_client.poll(), ticker.next()).await {
+            Either::First(res) => {
+                match res {
+                    Ok(event) => handle_mqtt_event(event).await,
+                    Err(e) => {
+                        esp_println::println!("MQTT error: {:?}", e);
+                        break;
+                    }
                 }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                esp_println::println!("MQTT error: {:?}", e);
-                break;
+            },
+            Either::Second(_) => {
+                let _ = mqtt_client.ping().await;
             }
         }
     }
 }
 
+async fn handle_mqtt_event(event: Event<'_>) {
+    let Event::Publish(p) = event else { return };
+    if let Ok(text) = core::str::from_utf8(p.message.as_ref()) {
+
+        UI_CH.send(parse_mqtt_event(&p.topic, text).unwrap()).await;
+        let mut s: String<64> = String::new();
+        let _ = s.push_str(text);
+        MQTT_TO_LCD.send(s).await;
+    }
+}
+
+fn parse_mqtt_event(topic: &MqttString, text: &str) -> Option<UiCommand> {
+    let mut parts = topic.as_ref().rsplit('/');
+    
+    if let (Some(direction_id), Some(line_str)) = (parts.next(), parts.next()) {
+        let mut line: String<16> = heapless::String::new();
+        let _ = line.push_str(line_str);
+        let mut next_passages: heapless::Vec<TramNextPassage, 3> = Vec::new();
+        for passage in text.split("\n") {
+            let mut destination_buffer: String<32> = heapless::String::new();
+            let mut passage_parts = passage.split("|");
+            if let (Some(destination), Some(relative_arrival), Some(_)) = (passage_parts.next(), passage_parts.next(), passage_parts.next()) {
+                let _ = destination_buffer.push_str(destination);
+                let _ = next_passages.push(TramNextPassage {
+                    destination: destination_buffer,
+                    relative_arrival: relative_arrival.parse().unwrap()
+                });
+            }
+        }
+        let cmd = UiCommand::UpdateDirection { line, direction_id: 0, next_passages };
+        esp_println::println!("{:?}", cmd);
+        return Some(cmd)
+    }
+    None
+}

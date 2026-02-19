@@ -76,6 +76,7 @@ defmt = "1.0.1"
 esp-wifi-sys = { version = "0.8.1", features = [
   "esp32c6"
 ]}
+embassy-futures = "0.1.2"
 
 
 [profile.dev]
