@@ -7,35 +7,25 @@ use core::fmt::Write;
 
 pub struct LcdRenderer<'a> {
     lcd_screen: Lcd<'a>,
-    current_line: usize,
-    current_direction: usize,
+    last_rendered: Option<TramDirectionState>,
+    last_rendered_line: Option<heapless::String<16>>
 }
 
 impl<'a> LcdRenderer<'a> {
     pub fn new(lcd_screen: Lcd<'a>) -> Self {
         LcdRenderer { 
             lcd_screen,
-            current_line: 0,
-            current_direction: 0 
+            last_rendered: None,
+            last_rendered_line: None,
         }
     }
 
-    fn advance(&mut self, state: &UiState) {
-        let lines = &state.lines;
-        if lines.is_empty() {
-            return;
-        }
-
-        self.current_direction += 1;
-
-        let line = &lines[self.current_line];
-        if self.current_direction >= line.directions.len() {
-            self.current_direction = 0;
-            self.current_line = (self.current_line + 1) % lines.len();
-        }
-    }
 
     async fn render_line(&mut self, line: &heapless::String<16>,tram_direction_state: &TramDirectionState) {
+        if self.last_rendered.as_ref() == Some(tram_direction_state) 
+          && self.last_rendered_line.as_ref() == Some(line) {
+            return; // nothing changed
+        }
         self.lcd_screen.clear().await;
         self.lcd_screen.print(line).await;
         self.lcd_screen.set_cursor(1, 0).await;
@@ -46,11 +36,15 @@ impl<'a> LcdRenderer<'a> {
             let mut buf: heapless::String<20> = heapless::String::new();
             for (i, next) in tram_direction_state.next_passages.iter().enumerate() {
                 buf.clear();
-                let next_arrival = next.relative_arrival;
-                let _ = write!(buf, "{} {}", next.destination, next.relative_arrival);
+                let _ = write!(buf, "{:<17} {:>2}", next.destination, next.relative_arrival);
                 self.lcd_screen.set_cursor(i as u8 + 1, 0).await;
                 self.lcd_screen.print(&buf).await;
             }
+            self.lcd_screen.set_cursor(3, 12).await;
+            self.lcd_screen.print(&tram_direction_state.update_at).await;
+
+            self.last_rendered = Some(tram_direction_state.clone());
+            self.last_rendered_line = Some(line.clone());
         }
     }
 }
@@ -61,8 +55,8 @@ impl TramDisplay for LcdRenderer<'_> {
             return;
         }
 
-        let Some(line) = state.lines.get(self.current_line) else { return };
-        if let Some(directions) = line.directions.get(self.current_direction) {
+        let Some(line) = state.lines.get(state.current_line) else { return };
+        if let Some(directions) = line.directions.get(state.current_direction_id) {
             self.render_line(&line.line,directions).await;
         }
     }

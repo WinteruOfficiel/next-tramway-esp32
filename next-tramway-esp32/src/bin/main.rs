@@ -5,7 +5,7 @@ use core::str::FromStr;
 use heapless::{String, Vec};
 use next_tramway_esp32::{display::{TramDisplay, TramNextPassage, UiCommand, UiState, apply_ui_command}, lcd::{Lcd, LcdRenderer}};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::{self, Channel}, mutex::Mutex};
-use esp_hal::{Blocking, clock::CpuClock, i2c::master::I2c, time::Rate, timer::timg::TimerGroup};
+use esp_hal::{Blocking, clock::CpuClock, gpio::{self, Input}, i2c::master::I2c, time::Rate, timer::timg::TimerGroup};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, Ticker};
 use esp_radio::{
@@ -174,7 +174,11 @@ async fn main(spawner: Spawner) {
 
     let lcd = Lcd::new(&I2C_BUS, next_tramway_esp32::lcd::LcdGeometry::L2004);
     lcd.init().await;
-    spawner.spawn(renderer(LcdRenderer::new(lcd)));
+    spawner.spawn(renderer(LcdRenderer::new(lcd))).ok();
+
+    let button = Input::new(peripherals.GPIO11, gpio::InputConfig::default()
+    .with_pull(gpio::Pull::Up));
+    spawner.spawn(button_task(button)).ok();
 
     let stats: HeapStats = esp_alloc::HEAP.stats();
     esp_println::println!("{}", stats);
@@ -201,6 +205,8 @@ async fn renderer(mut display: LcdRenderer<'static>) {
 
     let mut state = UiState {
         lines: heapless::Vec::new(),
+        current_line: 0,
+        current_direction_id: 0
     };
     esp_println::println!("Renderer ready !");
     loop {
@@ -344,7 +350,7 @@ async fn mqtt(stack: embassy_net::Stack<'static>) {
         qos: rust_mqtt::types::QoS::ExactlyOnce 
 
     };
-    let s = MqttString::from_slice("next-tramway/line/TramC/1").unwrap();
+    let s = MqttString::from_slice("next-tramway/line/#").unwrap();
     let topic = unsafe {
         TopicName::new_unchecked(s)
     };
@@ -394,20 +400,43 @@ fn parse_mqtt_event(topic: &MqttString, text: &str) -> Option<UiCommand> {
         let mut line: String<16> = heapless::String::new();
         let _ = line.push_str(line_str);
         let mut next_passages: heapless::Vec<TramNextPassage, 3> = Vec::new();
-        for passage in text.split("\n") {
-            let mut destination_buffer: String<32> = heapless::String::new();
-            let mut passage_parts = passage.split("|");
-            if let (Some(destination), Some(relative_arrival), Some(_)) = (passage_parts.next(), passage_parts.next(), passage_parts.next()) {
-                let _ = destination_buffer.push_str(destination);
-                let _ = next_passages.push(TramNextPassage {
-                    destination: destination_buffer,
-                    relative_arrival: relative_arrival.parse().unwrap()
-                });
+        let mut text_split_iter = text.split('\n');
+        if let Some(update_at) = text_split_iter.next_back() {
+            for passage in text_split_iter {
+                let mut destination_buffer: String<32> = heapless::String::new();
+                let mut passage_parts = passage.split("|");
+                if let (Some(destination), Some(relative_arrival), Some(_)) = (passage_parts.next(), passage_parts.next(), passage_parts.next()) {
+                    let _ = destination_buffer.push_str(destination);
+                    let _ = next_passages.push(TramNextPassage {
+                        destination: destination_buffer,
+                        relative_arrival: relative_arrival.parse().unwrap()
+                    });
+                }
             }
+            let mut update_at_buffer:  String<10> = heapless::String::new();
+            let _ = update_at_buffer.push_str(update_at);
+            let cmd = UiCommand::UpdateDirection { line, direction_id: direction_id.parse().unwrap(), next_passages, update_at: update_at_buffer };
+            esp_println::println!("{:?}", cmd);
+            return Some(cmd)
         }
-        let cmd = UiCommand::UpdateDirection { line, direction_id: 0, next_passages };
-        esp_println::println!("{:?}", cmd);
-        return Some(cmd)
+        
+
     }
     None
+}
+
+#[embassy_executor::task]
+async fn button_task(mut button: Input<'static>) {
+    loop {
+        button.wait_for_falling_edge().await;
+
+        Timer::after(Duration::from_millis(50)).await;
+
+        if button.is_low() {
+            esp_println::println!("BOUTON");
+            UI_CH.send(UiCommand::NextScreen).await;
+        }
+
+        button.wait_for_rising_edge().await;
+    }
 }
