@@ -2,9 +2,10 @@
 #![no_main]
 
 use core::str::FromStr;
+use heapless::String;
 use next_tramway_esp32::lcd::Lcd;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use esp_hal::{ram, Blocking, clock::CpuClock, i2c::master::I2c, time::Rate, timer::timg::TimerGroup};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, channel};
+use esp_hal::{Blocking, clock::CpuClock, i2c::master::I2c, time::Rate, timer::timg::TimerGroup};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_radio::{
@@ -24,10 +25,11 @@ use embassy_net::{Runner, StackResources, tcp::TcpSocket};
 use defmt::{Debug2Format};
 use rust_mqtt::{
     client::{
-        Client,
         options::{
-            ConnectOptions
-        }
+            ConnectOptions,
+            SubscriptionOptions
+        },
+        event::{Event},
     },
     config::{
         KeepAlive,
@@ -35,7 +37,8 @@ use rust_mqtt::{
     },
     types::{
         MqttString,
-        MqttBinary
+        MqttBinary,
+        TopicName
     }
 };
 use static_cell::StaticCell;
@@ -71,6 +74,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 static I2C_BUS: Mutex<CriticalSectionRawMutex, Option<I2c<'static, Blocking>>> =
     Mutex::new(None);
+
+static MQTT_TO_LCD: channel::Channel<CriticalSectionRawMutex, heapless::String<32>, 4> = channel::Channel::new();
 
     
 
@@ -137,9 +142,7 @@ async fn main(spawner: Spawner) {
         esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
     esp_println::println!("Wifi controlller init !");
 
-
-
-     let wifi_interface = interfaces.sta;
+    let wifi_interface = interfaces.sta;
 
     let config = embassy_net::Config::dhcpv4(Default::default());
 
@@ -158,10 +161,81 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(connection(controller)).ok();
     spawner.spawn(net_task(runner)).ok();
+    spawner.spawn(mqtt(stack)).ok();
 
     let stats: HeapStats = esp_alloc::HEAP.stats();
     esp_println::println!("{}", stats);
 
+    
+    Timer::after(Duration::from_millis(50)).await;
+    scan_i2c_bus().await;
+
+    let mut lcd = Lcd::new(&I2C_BUS);
+    lcd.init().await;
+    lcd.print("Estrogen\nUwu").await;
+
+    loop {
+        let msg = MQTT_TO_LCD.receive().await;
+        lcd.clear().await;
+        lcd.print(&msg).await;
+    }
+}
+
+
+#[embassy_executor::task]
+async fn connection(mut controller: WifiController<'static>) {
+    esp_println::println!("start connection task");
+    esp_println::println!("Device capabilities: {:?}", controller.capabilities());
+    esp_println::println!("{SSID}");
+
+    loop {
+        if esp_radio::wifi::sta_state() == WifiStaState::Connected {
+            // wait until we're no longer connected
+            controller.wait_for_event(WifiEvent::StaDisconnected).await;
+            Timer::after(Duration::from_millis(5000)).await
+        }
+        if !matches!(controller.is_started(), Ok(true)) {
+            let client_config = ModeConfig::Client(
+                ClientConfig::default()
+                    .with_ssid(SSID.into())
+                    .with_password(PASSWORD.into()),
+            );
+            controller.set_config(&client_config).unwrap();
+            esp_println::println!("Starting wifi");
+            controller.start_async().await.unwrap();
+            esp_println::println!("Wifi started!");
+
+            esp_println::println!("Scan");
+            let scan_config = ScanConfig::default().with_max(1).with_ssid(SSID);
+            let result = controller
+                .scan_with_config_async(scan_config)
+                .await
+                .unwrap();
+            for ap in result {
+                esp_println::println!("{:?}", ap);
+            }
+        }
+        esp_println::println!("About to connect...");
+    let stats: HeapStats = esp_alloc::HEAP.stats();
+    esp_println::println!("{}", stats);
+
+        match controller.connect_async().await {
+            Ok(_) => esp_println::println!("Wifi connected!"),
+            Err(e) => {
+                esp_println::println!("Failed to connect to wifi: {e:?}");
+                Timer::after(Duration::from_millis(500)).await
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn mqtt(stack: embassy_net::Stack<'static>) {
     loop {
         if stack.is_link_up() {
             break;
@@ -169,6 +243,7 @@ async fn main(spawner: Spawner) {
         Timer::after(Duration::from_millis(500)).await;
     }
 
+    // TODO: Shouldn't be there
     esp_println::println!("Waiting to get IP address...");
     loop {
         if let Some(config) = stack.config_v4() {
@@ -224,68 +299,40 @@ async fn main(spawner: Spawner) {
         },
     }
     
-    Timer::after(Duration::from_millis(50)).await;
-    scan_i2c_bus().await;
+    let sub_options = SubscriptionOptions {
+        retain_handling: rust_mqtt::client::options::RetainHandling::SendIfNotSubscribedBefore, 
+        retain_as_published: true, 
+        no_local: true, 
+        qos: rust_mqtt::types::QoS::ExactlyOnce 
 
-    let mut lcd = Lcd::new(&I2C_BUS);
-    lcd.init().await;
-    lcd.print("Estrogen\nUwu").await;
-
-    loop {
-        Timer::after(Duration::from_secs(1)).await;
-    }
-}
-
-
-#[embassy_executor::task]
-async fn connection(mut controller: WifiController<'static>) {
-    esp_println::println!("start connection task");
-    esp_println::println!("Device capabilities: {:?}", controller.capabilities());
-    esp_println::println!("{SSID}");
-
-    loop {
-        if esp_radio::wifi::sta_state() == WifiStaState::Connected {
-            // wait until we're no longer connected
-            controller.wait_for_event(WifiEvent::StaDisconnected).await;
-            Timer::after(Duration::from_millis(5000)).await
+    };
+    let s = MqttString::from_slice("test").unwrap();
+    let topic = unsafe {
+        TopicName::new_unchecked(s)
+    };
+    match mqtt_client.subscribe(topic.into(), sub_options).await {
+        Ok(_) => esp_println::println!("Sent Subscribe"),
+        Err(e) => {
+            esp_println::println!("Failed to subscribe: {:?}", e);
+            return;
         }
-        if !matches!(controller.is_started(), Ok(true)) {
-            let client_config = ModeConfig::Client(
-                ClientConfig::default()
-                    .with_ssid(SSID.into())
-                    .with_password(PASSWORD.into()),
-            );
-            controller.set_config(&client_config).unwrap();
-            esp_println::println!("Starting wifi");
-            controller.start_async().await.unwrap();
-            esp_println::println!("Wifi started!");
-
-            esp_println::println!("Scan");
-            let scan_config = ScanConfig::default().with_max(1).with_ssid(SSID);
-            let result = controller
-                .scan_with_config_async(scan_config)
-                .await
-                .unwrap();
-            for ap in result {
-                esp_println::println!("{:?}", ap);
+    };
+    // loop MQTT
+    loop {
+        match mqtt_client.poll().await {
+            Ok(Event::Publish(p)) => {
+                if let Ok(text) = core::str::from_utf8(p.message.as_ref()) {
+                    let mut s: String<32> = String::new();
+                    let _ = s.push_str(text);
+                    MQTT_TO_LCD.send(s).await;
+                }
             }
-        }
-        esp_println::println!("About to connect...");
-    let stats: HeapStats = esp_alloc::HEAP.stats();
-    esp_println::println!("{}", stats);
-
-        match controller.connect_async().await {
-            Ok(_) => esp_println::println!("Wifi connected!"),
+            Ok(_) => {}
             Err(e) => {
-                esp_println::println!("Failed to connect to wifi: {e:?}");
-                Timer::after(Duration::from_millis(500)).await
+                esp_println::println!("MQTT error: {:?}", e);
+                break;
             }
         }
     }
-}
-
-#[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
-    runner.run().await
 }
 
