@@ -132,14 +132,16 @@ async fn main(spawner: Spawner) {
 
     esp_println::logger::init_logger_from_env();
     esp_println::println!("Embassy init !");
+    let i2c_scl = peripherals.GPIO21;
+    let i2c_sda = peripherals.GPIO22;
 
     let i2c_bus = esp_hal::i2c::master::I2c::new(
         peripherals.I2C0,
         esp_hal::i2c::master::Config::default().with_frequency(Rate::from_khz(400)),
     )
         .unwrap()
-        .with_scl(peripherals.GPIO21)
-        .with_sda(peripherals.GPIO22);
+        .with_scl(i2c_scl)
+        .with_sda(i2c_sda);
 
     I2C_BUS.lock().await.replace(i2c_bus);
     esp_println::println!("I2C Bus init !");
@@ -406,7 +408,11 @@ async fn mqtt(stack: embassy_net::Stack<'static>) {
 async fn handle_mqtt_event(event: Event<'_>) {
     let Event::Publish(p) = event else { return };
     if let Ok(text) = core::str::from_utf8(p.message.as_ref()) {
-        UI_CH.send(parse_mqtt_event(&p.topic, text).unwrap()).await;
+        if let Some(cmd) = parse_mqtt_event(&p.topic, text) {
+            UI_CH.send(cmd).await;
+        } else {
+            esp_println::println!("Failed to parse MQTT event: {:?}", p);
+        }
     }
 }
 
@@ -426,13 +432,33 @@ fn parse_mqtt_event(topic: &MqttString, text: &str) -> Option<UiCommand> {
                     let _ = destination_buffer.push_str(destination);
                     let _ = next_passages.push(TramNextPassage {
                         destination: destination_buffer,
-                        relative_arrival: relative_arrival.parse().unwrap()
+                        relative_arrival: match relative_arrival.parse() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                esp_println::println!("Failed to parse relative_arrival: {}", relative_arrival);
+                                return None;
+                            }
+                        }
                     });
                 }
             }
             let mut update_at_buffer:  String<10> = heapless::String::new();
             let _ = update_at_buffer.push_str(update_at);
-            let cmd = UiCommand::UpdateDirection { line, direction_id: direction_id.parse().unwrap(), next_passages, update_at: update_at_buffer };
+
+            let direction_id = match direction_id.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    esp_println::println!("Failed to parse direction_id: {}", direction_id);
+                    return None;
+                }
+            };
+
+            let cmd = UiCommand::UpdateDirection { 
+                line, 
+                direction_id, 
+                next_passages, 
+                update_at: update_at_buffer 
+            };
             esp_println::println!("{:?}", cmd);
             return Some(cmd)
         }
