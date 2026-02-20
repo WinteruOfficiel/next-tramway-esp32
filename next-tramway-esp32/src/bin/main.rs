@@ -5,7 +5,7 @@ use core::str::FromStr;
 use heapless::{String, Vec};
 use next_tramway_esp32::{display::{TramDisplay, TramNextPassage, UiCommand, UiState, apply_ui_command}, lcd::{Lcd, LcdRenderer}};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex};
-use esp_hal::{Blocking, clock::CpuClock, gpio::{self, Input}, i2c::master::I2c, time::Rate, timer::timg::TimerGroup};
+use esp_hal::{Blocking, clock::CpuClock, gpio::{self, Input}, i2c::master::I2c, peripherals::TIMG0, time::Rate, timer::timg::{MwdtStage, MwdtStageAction, TimerGroup, Wdt}};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, Ticker};
 use esp_radio::{
@@ -135,6 +135,11 @@ async fn main(spawner: Spawner) {
     
 
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    let mut wdt = timg0.wdt;
+    wdt.set_timeout(MwdtStage::Stage0, esp_hal::time::Duration::from_secs(10));
+    wdt.set_stage_action(MwdtStage::Stage0, MwdtStageAction::ResetSystem);
+    wdt.enable();
+    spawner.spawn(watchdog_task(wdt)).ok();
 
     esp_println::logger::init_logger_from_env();
     esp_println::println!("Embassy init !");
@@ -489,5 +494,15 @@ async fn button_task(mut button: Input<'static>) {
         }
 
         button.wait_for_rising_edge().await;
+    }
+}
+
+#[embassy_executor::task]
+async fn watchdog_task(mut wdt: Wdt<TIMG0<'static>>) {
+    let mut ticker = Ticker::every(Duration::from_secs(2));
+
+    loop {
+        ticker.next().await;
+        wdt.feed();
     }
 }
