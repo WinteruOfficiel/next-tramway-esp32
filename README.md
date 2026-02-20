@@ -4,6 +4,8 @@ A real-time tramway arrival display system built with Rust for the ESP32-C6 micr
 
 This system is specifically designed for use in Grenoble, France, leveraging the M-Mobilités API to fetch real-time tramway data.
 
+<img src="image.jpg" width="200">
+
 ## Features
 
 - **Real-time MQTT Updates**: Subscribes to `next-tramway/line/#` topics to receive live tramway arrival information
