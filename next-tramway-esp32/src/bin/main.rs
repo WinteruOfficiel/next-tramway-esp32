@@ -84,20 +84,30 @@ static UI_CH: Channel<CriticalSectionRawMutex,  UiCommand,8> = Channel::new();
     
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    esp_println::println!("\n\n=== PANIC ===");
+
+    if let Some(location) = info.location() {
+        esp_println::println!(
+            "At {}:{}:{}",
+            location.file(),
+            location.line(),
+            location.column()
+        );
+    }
+    esp_println::println!("Message: {}", info.message());
+
     loop {}
 }
 
 async fn scan_i2c_bus() {
-    esp_println::println!("Waiting for i2c mutex...");
-    let mut guard = I2C_BUS.lock().await;
-    let i2c = guard.as_mut().expect("I2C not initialized");
     esp_println::println!("Scanning I2C bus...");
 
     for addr in 0x08..=0x77 {
-        let result = i2c.write(addr, &[]);
-
-        if result.is_ok() {
+        let mut guard = I2C_BUS.lock().await;
+        let i2c = guard.as_mut().expect("I2C not initialized");
+        esp_println::print!("0x{:02X}...", addr);
+        if i2c.write(addr, &[]).is_ok() {
             esp_println::println!("I2C device found at 0x{:02X}", addr);
         }
     }

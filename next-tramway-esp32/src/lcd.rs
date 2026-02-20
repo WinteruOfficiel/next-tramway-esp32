@@ -6,6 +6,18 @@ use heapless::String;
 use crate::display::{TramDirectionState, TramDisplay};
 use core::fmt::Write;
 
+fn pad_to_width<const N: usize>(
+    s: &mut heapless::String<N>,
+    width: usize,
+) {
+    let len = s.len();
+
+    if len < width {
+        for _ in 0..(width - len) {
+            let _ = s.push(' ');
+        }
+    }
+}
 
 pub fn wrap_text<const OUT: usize>(
     input: &str,
@@ -35,7 +47,8 @@ pub fn wrap_text<const OUT: usize>(
 pub struct LcdRenderer<'a> {
     lcd_screen: Lcd<'a>,
     last_rendered: Option<TramDirectionState>,
-    last_rendered_line: Option<heapless::String<16>>
+    last_rendered_line: Option<heapless::String<16>>,
+    display_buffer: [heapless::String<20>; 4],
 }
 
 impl<'a> LcdRenderer<'a> {
@@ -44,6 +57,12 @@ impl<'a> LcdRenderer<'a> {
             lcd_screen,
             last_rendered: None,
             last_rendered_line: None,
+            display_buffer: [
+                heapless::String::new(),
+                heapless::String::new(),
+                heapless::String::new(),
+                heapless::String::new(),
+             ]
         }
     }
 
@@ -53,26 +72,43 @@ impl<'a> LcdRenderer<'a> {
           && self.last_rendered_line.as_ref() == Some(line) {
             return; // nothing changed
         }
-        self.lcd_screen.clear().await;
-        self.lcd_screen.print(line).await;
-        self.lcd_screen.set_cursor(1, 0).await;
+        let mut new_buffer: [heapless::String<20>; 4] = Default::default();
+        let _ = new_buffer[0].push_str(line);
 
         if tram_direction_state.next_passages.is_empty() {
-            self.lcd_screen.print("Pas de passage dans\nl'heure...").await;
+            let _ = new_buffer[1].push_str("Pas de passage dans");
+            let _ = new_buffer[2].push_str("l'heure...");
         } else {
             let mut buf: heapless::String<20> = heapless::String::new();
             for (i, next) in tram_direction_state.next_passages.iter().enumerate() {
                 buf.clear();
-                let _ = write!(buf, "{:<17} {:>2}", next.destination, next.relative_arrival);
-                self.lcd_screen.set_cursor(i as u8 + 1, 0).await;
-                self.lcd_screen.print(&buf).await;
+                let _ = write!(new_buffer[i + 1], "{:<17} {:>2}", next.destination, next.relative_arrival);
             }
         }
-        self.lcd_screen.set_cursor(3, 12).await;
-        self.lcd_screen.print(&tram_direction_state.update_at).await;
+        let _ = write!(
+            new_buffer[3],
+            "{:>20}",
+            tram_direction_state.update_at
+        );
 
         self.last_rendered = Some(tram_direction_state.clone());
         self.last_rendered_line = Some(line.clone());
+
+        // the true bottleneck is the LCD update
+        // trading CPU for less I2C traffic is worth it
+        let (_, width, _) = self.lcd_screen.get_size_and_offset();
+
+        for i in 0..4 {
+            pad_to_width(&mut new_buffer[i], (width +1) as usize);
+        }
+
+        for i in 0..4 {
+            if self.display_buffer[i] != new_buffer[i] {
+                self.lcd_screen.set_cursor(i as u8, 0).await;
+                self.lcd_screen.print(&new_buffer[i]).await;
+                self.display_buffer[i] = new_buffer[i].clone();
+            }
+        }
     }
 }
 
