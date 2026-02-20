@@ -7,12 +7,14 @@ pub enum UiCommand {
         next_passages: heapless::Vec<TramNextPassage, 3>, 
         update_at: heapless::String<10>
     },
+    UpdateMessage(heapless::String<80>),
     NextScreen
 }
 
 #[derive(Debug)]
 pub struct UiState {
     pub lines: heapless::Vec<TramLineState, 8>,
+    pub current_message: Option<heapless::String<80>>,
     pub current_line: usize,
     pub current_direction_id: usize 
 }
@@ -91,5 +93,8 @@ pub fn apply_ui_command(state: &mut UiState, cmd: UiCommand) {
                 state.current_line = (state.current_line + 1) % lines.len();
             }
         },
+        UiCommand::UpdateMessage(string_inner) => {
+            state.current_message = Some(string_inner);
+        }
     }
 }

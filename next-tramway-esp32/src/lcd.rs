@@ -1,9 +1,36 @@
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Timer, Duration};
 use esp_hal::{Blocking, i2c::master::I2c};
+use heapless::String;
 
-use crate::display::{TramDirectionState, TramDisplay, UiState};
+use crate::display::{TramDirectionState, TramDisplay};
 use core::fmt::Write;
+
+
+pub fn wrap_text<const OUT: usize>(
+    input: &str,
+    line_width: usize,
+    output: &mut String<OUT>,
+) {
+    output.clear();
+
+    let mut current_width = 0;
+
+    for c in input.chars() {
+        if current_width >= line_width {
+            if output.push('\n').is_err() {
+                return; // overflow 
+            }
+            current_width = 0;
+        }
+
+        if output.push(c).is_err() {
+            return; // overlow
+        }
+
+        current_width += 1;
+    }
+}
 
 pub struct LcdRenderer<'a> {
     lcd_screen: Lcd<'a>,
@@ -31,7 +58,7 @@ impl<'a> LcdRenderer<'a> {
         self.lcd_screen.set_cursor(1, 0).await;
 
         if tram_direction_state.next_passages.is_empty() {
-            self.lcd_screen.print("Pas de passage...").await;
+            self.lcd_screen.print("Pas de passage dans\nl'heure...").await;
         } else {
             let mut buf: heapless::String<20> = heapless::String::new();
             for (i, next) in tram_direction_state.next_passages.iter().enumerate() {
@@ -40,18 +67,26 @@ impl<'a> LcdRenderer<'a> {
                 self.lcd_screen.set_cursor(i as u8 + 1, 0).await;
                 self.lcd_screen.print(&buf).await;
             }
-            self.lcd_screen.set_cursor(3, 12).await;
-            self.lcd_screen.print(&tram_direction_state.update_at).await;
-
-            self.last_rendered = Some(tram_direction_state.clone());
-            self.last_rendered_line = Some(line.clone());
         }
+        self.lcd_screen.set_cursor(3, 12).await;
+        self.lcd_screen.print(&tram_direction_state.update_at).await;
+
+        self.last_rendered = Some(tram_direction_state.clone());
+        self.last_rendered_line = Some(line.clone());
     }
 }
 
 impl TramDisplay for LcdRenderer<'_> {
     async fn render<'b>(&'b mut self, state: &'b crate::display::UiState) {
         if state.lines.is_empty() {
+            if let Some(message) = &state.current_message {
+                self.lcd_screen.clear().await;
+                let (_, line_width, _) = self.lcd_screen.get_size_and_offset();
+                let mut buffer: heapless::String<80> = heapless::String::new();
+                wrap_text(message, (line_width + 1) as usize, &mut buffer);
+                // esp_println::println!("{}",buffer);
+                self.lcd_screen.print(&buffer).await;
+            }
             return;
         }
 
@@ -72,8 +107,8 @@ pub enum LcdGeometry {
 const LCD_ADDR: u8 = 0x27;
 mod lcd_bits {
     pub const EN: u8 = 0b0000_0100; 
-    pub const RW: u8 = 0b0000_0010;
-    pub const RS: u8 = 0b0000_0001;
+    // pub const RW: u8 = 0b0000_0010;
+    // pub const RS: u8 = 0b0000_0001;
     pub const BL: u8 = 0b0000_1000;
 }
 
