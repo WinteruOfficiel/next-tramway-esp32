@@ -43,9 +43,9 @@ class NextTramway(Hass):
             return t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec
 
         def relative_minutes(arrival_sec, now_sec):
-            delta = arrival_sec - now_sec
-
-            return delta // 60
+            SECONDS_PER_DAY = 86400
+            delta = (arrival_sec - now_sec) % SECONDS_PER_DAY
+            return delta // 60           
 
         for stop_time in response.json():
             if any(stop_time["pattern"]["id"].startswith(line) for line in lines_to_keep):
