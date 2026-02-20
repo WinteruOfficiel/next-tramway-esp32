@@ -2,6 +2,8 @@
 
 A real-time tramway arrival display system built with Rust for the ESP32-C6 microcontroller. This project connects to an MQTT server to receive tramway schedule updates and displays them on a 20x4 LCD screen via I2C.
 
+This system is specifically designed for use in Grenoble, France, leveraging the M-Mobilités API to fetch real-time tramway data.
+
 ## Features
 
 - **Real-time MQTT Updates**: Subscribes to `next-tramway/line/#` topics to receive live tramway arrival information
