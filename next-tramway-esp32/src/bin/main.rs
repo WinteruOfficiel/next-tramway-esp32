@@ -4,7 +4,7 @@
 use core::str::FromStr;
 use heapless::{String, Vec};
 use next_tramway_esp32::{display::{TramDisplay, TramNextPassage, UiCommand, UiState, apply_ui_command}, lcd::{Lcd, LcdRenderer}};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::{self, Channel}, mutex::Mutex};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex};
 use esp_hal::{Blocking, clock::CpuClock, gpio::{self, Input}, i2c::master::I2c, time::Rate, timer::timg::TimerGroup};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, Ticker};
@@ -78,7 +78,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static I2C_BUS: Mutex<CriticalSectionRawMutex, Option<I2c<'static, Blocking>>> =
     Mutex::new(None);
 
-static MQTT_TO_LCD: channel::Channel<CriticalSectionRawMutex, heapless::String<64>, 4> = channel::Channel::new();
 static UI_CH: Channel<CriticalSectionRawMutex,  UiCommand,8> = Channel::new();
 
     
@@ -133,7 +132,6 @@ async fn main(spawner: Spawner) {
 
     esp_println::logger::init_logger_from_env();
     esp_println::println!("Embassy init !");
-    spawner.spawn(lcd()).ok();
 
     let i2c_bus = esp_hal::i2c::master::I2c::new(
         peripherals.I2C0,
@@ -194,16 +192,6 @@ async fn main(spawner: Spawner) {
 }
 
 
-#[embassy_executor::task]
-async fn lcd() {
-    // let mut lcd = Lcd::new(&I2C_BUS, next_tramway_esp32::lcd::LcdGeometry::L2004);
-    // lcd.init().await;
-    loop {
-        let _ = MQTT_TO_LCD.receive().await;
-        // lcd.clear().await;
-        // lcd.print(&msg).await;
-    }
-}
 
 #[embassy_executor::task]
 async fn renderer(mut display: LcdRenderer<'static>) {
@@ -418,11 +406,7 @@ async fn mqtt(stack: embassy_net::Stack<'static>) {
 async fn handle_mqtt_event(event: Event<'_>) {
     let Event::Publish(p) = event else { return };
     if let Ok(text) = core::str::from_utf8(p.message.as_ref()) {
-
         UI_CH.send(parse_mqtt_event(&p.topic, text).unwrap()).await;
-        let mut s: String<64> = String::new();
-        let _ = s.push_str(text);
-        MQTT_TO_LCD.send(s).await;
     }
 }
 
