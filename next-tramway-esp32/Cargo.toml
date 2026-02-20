@@ -8,6 +8,9 @@ version      = "0.1.0"
 name = "next-tramway-esp32"
 path = "./src/bin/main.rs"
 
+[features]
+debug = []
+
 [dependencies]
 esp-hal = { version = "1.0.0", features = ["esp32c6", "unstable"] }
 

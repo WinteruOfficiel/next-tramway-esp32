@@ -69,6 +69,12 @@ const MQTT_PASSWORD: &str = env!("MQTT_PASSWORD");
 
 const MQTT_CLIENT_ID: &str = env!("MQTT_CLIENT_ID"); 
 
+#[cfg(feature = "debug")]
+const DEBUG: bool = true;
+
+#[cfg(not(feature = "debug"))]
+const DEBUG: bool = false;
+
 static RX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 static TX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 
@@ -146,7 +152,9 @@ async fn main(spawner: Spawner) {
     I2C_BUS.lock().await.replace(i2c_bus);
     esp_println::println!("I2C Bus init !");
     UI_CH.send(UiCommand::UpdateMessage(str_to_msg("I2C Bus initialized"))).await;
-    scan_i2c_bus().await;
+    if DEBUG {
+        scan_i2c_bus().await;
+    }
 
     let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
     esp_println::println!("radio controlller init !");
@@ -171,8 +179,6 @@ async fn main(spawner: Spawner) {
         mk_static!(StackResources<8>, StackResources::<8>::new()),
         seed,
     );
-
-    Timer::after(Duration::from_secs(1)).await;
 
     spawner.spawn(connection(controller)).ok();
     spawner.spawn(net_task(runner)).ok();
@@ -237,15 +243,17 @@ async fn connection(mut controller: WifiController<'static>) {
             controller.start_async().await.unwrap();
             esp_println::println!("Wifi started!");
 
-            esp_println::println!("Scan");
-            UI_CH.send(UiCommand::UpdateMessage(str_to_msg("Scanning wifi..."))).await;
-            let scan_config = ScanConfig::default().with_max(1).with_ssid(SSID);
-            let result = controller
-                .scan_with_config_async(scan_config)
-                .await
-                .unwrap();
-            for ap in result {
-                esp_println::println!("{:?}", ap);
+            if DEBUG {
+                esp_println::println!("Scan");
+                UI_CH.send(UiCommand::UpdateMessage(str_to_msg("Scanning wifi..."))).await;
+                let scan_config = ScanConfig::default().with_max(1).with_ssid(SSID);
+                let result = controller
+                    .scan_with_config_async(scan_config)
+                    .await
+                    .unwrap();
+                for ap in result {
+                    esp_println::println!("{:?}", ap);
+                }
             }
         }
         esp_println::println!("About to connect...");
