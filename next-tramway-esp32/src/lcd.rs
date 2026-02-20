@@ -6,6 +6,7 @@ use heapless::String;
 use crate::display::{TramDirectionState, TramDisplay};
 use core::fmt::Write;
 
+// add space padding at the end of the string to ensure that when we update the LCD, we properly clear the previous content if the new one is shorter
 fn pad_to_width<const N: usize>(
     s: &mut heapless::String<N>,
     width: usize,
@@ -19,6 +20,7 @@ fn pad_to_width<const N: usize>(
     }
 }
 
+// simple text wrapper that adds newlines to fit the text within the given width
 pub fn wrap_text<const OUT: usize>(
     input: &str,
     line_width: usize,
@@ -45,10 +47,10 @@ pub fn wrap_text<const OUT: usize>(
 }
 
 pub struct LcdRenderer<'a> {
-    lcd_screen: Lcd<'a>,
-    last_rendered: Option<TramDirectionState>,
-    last_rendered_line: Option<heapless::String<16>>,
-    display_buffer: [heapless::String<20>; 4],
+    lcd_screen: Lcd<'a>, // handle to the LCD screen, used to send commands and data to the LCD
+    last_rendered: Option<TramDirectionState>, // we keep track of the last rendered state to avoid unnecessary updates to the LCD, which can be slow (especially over I2C)
+    last_rendered_line: Option<heapless::String<16>>, 
+    display_buffer: [heapless::String<20>; 4], // we keep a buffer of the currently displayed content on the LCD to minimize the number of updates, which is slow 
 }
 
 impl<'a> LcdRenderer<'a> {
@@ -70,6 +72,9 @@ impl<'a> LcdRenderer<'a> {
     async fn render_line(&mut self, line: &heapless::String<16>,tram_direction_state: &TramDirectionState) {
         if self.last_rendered.as_ref() == Some(tram_direction_state) 
           && self.last_rendered_line.as_ref() == Some(line) {
+            // technically the display buffer would also be the same
+            // but it skips the whole rendering logic at the expense of some memory 
+
             return; // nothing changed
         }
         let mut new_buffer: [heapless::String<20>; 4] = Default::default();
@@ -112,6 +117,8 @@ impl<'a> LcdRenderer<'a> {
     }
 }
 
+// assume a 20x04 LCD screen is used
+// I feel like 16x02 would be too small anyway
 impl TramDisplay for LcdRenderer<'_> {
     async fn render<'b>(&'b mut self, state: &'b crate::display::UiState) {
         if state.lines.is_empty() {
@@ -133,14 +140,12 @@ impl TramDisplay for LcdRenderer<'_> {
     }
 }
 
+// could be more generic, but this is good enough for our use case, and we can always refactor later if needed
 pub enum LcdGeometry {
-    L1602,
-    L2004,
+    L1602, // 16 characters, 2 lines
+    L2004, // 20 characters, 4 lines
 }
 
-
-
-const LCD_ADDR: u8 = 0x27;
 mod lcd_bits {
     pub const EN: u8 = 0b0000_0100; 
     // pub const RW: u8 = 0b0000_0010;
@@ -155,19 +160,28 @@ mod lcd_commands {
 
 pub struct Lcd<'a> {
     bus: &'a Mutex<CriticalSectionRawMutex, Option<I2c<'static, Blocking>>>,
+    i2c_addr: u8,
     geom: LcdGeometry,
     curr_row: u8,
     curr_col: u8
 }
+
+// Source: https://cdn.sparkfun.com/assets/9/5/f/7/b/HD44780.pdf
+// assumes that the LCD is connected in 4-bit mode, with an I2C backpack (e.g. based on PCF8574) that maps the I2C data to the LCD pins as follows:
+// D7 D6 D5 D4 BL EN RW RS
+// some things could be enhanced here in the future, probably
+// Doesn't contain the rendering logic, just the low-level commands to control the LCD (used by the LcdRenderer to render the UI state)
 impl<'a> Lcd<'a> {
 
     pub fn new(
         bus: &'a Mutex<CriticalSectionRawMutex, Option<I2c<'static, Blocking>>>,
+        i2c_addr: u8,
         geom: LcdGeometry
     ) -> Self {
-        Self { bus, geom, curr_row: 0, curr_col: 0 }
+        Self { i2c_addr, bus, geom, curr_row: 0, curr_col: 0 }
     }
 
+    // set the LCD in the desired mode and initialize it, needs to be called before any other command
     pub async fn init(&self) {
         self.set_4_bits_mode().await;
         Timer::after(Duration::from_millis(5)).await;
@@ -182,7 +196,7 @@ impl<'a> Lcd<'a> {
 
     fn get_size_and_offset(&self) -> (u8, u8, &[u8]) {
         match self.geom {
-            LcdGeometry::L1602 => (1, 15, &[0x00, 0x40][..]),
+            LcdGeometry::L1602 => (1, 15, &[0x00, 0x40]),
             LcdGeometry::L2004 => (3, 19, &[0x00, 0x40, 0x14, 0x54]),
         }
     }
@@ -195,7 +209,7 @@ impl<'a> Lcd<'a> {
         self.curr_col = col;
     }
 
-    pub async fn command(&self, value: u8) {
+    async fn command(&self, value: u8) {
         self.send(value, 0).await;
     }
 
@@ -223,7 +237,7 @@ impl<'a> Lcd<'a> {
         self.send(c as u8, 1).await;
     }
 
-    pub async fn send(&self, value: u8, mode: u8) {
+    async fn send(&self, value: u8, mode: u8) {
         let highnib = value & 0xF0;
         let lownib = (value << 4) & 0xF0;
         self.write_4_bits(highnib | mode | lcd_bits::BL).await;
@@ -231,7 +245,7 @@ impl<'a> Lcd<'a> {
     }
 
     // D7 D6 D5 D4 BL EN RW RS
-    pub async fn write_4_bits(&self, value: u8) {
+    async fn write_4_bits(&self, value: u8) {
         let mut guard = self.bus.lock().await;
         let i2c = guard.as_mut().expect("I2C not initialized");
         self.write_i2c(i2c, value);
@@ -239,7 +253,7 @@ impl<'a> Lcd<'a> {
     }
 
     fn write_i2c(&self, i2c_bus: &mut I2c<'_, Blocking>, data: u8) {
-        let result = i2c_bus.write(LCD_ADDR, &[data]);
+        let result = i2c_bus.write(self.i2c_addr, &[data]);
 
         if result.is_err() {
             esp_println::println!("Error when sending");
@@ -253,7 +267,7 @@ impl<'a> Lcd<'a> {
         Timer::after(Duration::from_micros(50)).await;
     }
 
-    pub async fn set_4_bits_mode(&self) {
+    async fn set_4_bits_mode(&self) {
         self.write_4_bits(0x03 << 4).await;
         Timer::after(Duration::from_micros(4500)).await;
         self.write_4_bits(0x03 << 4).await;
