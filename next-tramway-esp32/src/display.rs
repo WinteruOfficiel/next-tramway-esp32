@@ -12,7 +12,9 @@ pub enum UiCommand {
         update_at: heapless::String<10>
     },
     UpdateMessage(heapless::String<80>),
-    NextScreen
+    NextScreen,
+    ToggleBacklight,
+    SetBacklight(bool)
 }
 
 // main data structure representing the current state of the UI, which can be rendered by a TramDisplay implementation
@@ -21,7 +23,8 @@ pub struct UiState {
     pub lines: heapless::Vec<TramLineState, 8>, // next passages data
     pub current_message: Option<heapless::String<80>>, // Log message to display, it's up to the display implementation to decide when (and if) to show it (e.g. only when there are no lines to display)
     pub current_line: usize, // index of the currently displayed line in `lines`, used for cycling through lines when there are more lines than can be displayed at once
-    pub current_direction_id: usize // id of the currently displayed direction for the current line  
+    pub current_direction_id: usize, // id of the currently displayed direction for the current line  
+    pub backlight_on: bool // whether the backlight is on or off, used to control the backlight of the display
 }
 
 // represents the state of a single tram line, which can have multiple directions (towards both directions of the line)
@@ -47,6 +50,7 @@ pub struct TramNextPassage {
 // trait that defines the interface for rendering the UI state, which can be implemented by different display types (e.g. LCD, OLED, etc.)
 pub trait TramDisplay {
     fn render<'a>(&'a mut self, state: &'a UiState) -> impl core::future::Future<Output = ()> + 'a;
+    fn healthcheck<'a>(&'a mut self) -> impl core::future::Future<Output = ()> + 'a;
 }
 
 // When we receive a ui command, we need to update the UI state accordingly, this function contains the logic to do so
@@ -108,6 +112,12 @@ pub fn apply_ui_command(state: &mut UiState, cmd: UiCommand) {
         },
         UiCommand::UpdateMessage(string_inner) => {
             state.current_message = Some(string_inner);
+        }
+        UiCommand::ToggleBacklight => {
+            state.backlight_on = !state.backlight_on;
+        },
+        UiCommand::SetBacklight(on) => {
+            state.backlight_on = on;
         }
     }
 }

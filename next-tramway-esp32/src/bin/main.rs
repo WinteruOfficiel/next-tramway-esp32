@@ -213,7 +213,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(mqtt(stack)).ok();
 
     // Renderer setup
-    let lcd = Lcd::new(
+    let mut lcd = Lcd::new(
         &I2C_BUS,
         LCD_ADDR,
         next_tramway_esp32::lcd::LcdGeometry::L2004,
@@ -243,14 +243,26 @@ async fn renderer(mut display: LcdRenderer<'static>) {
         current_message: None,
         current_line: 0,
         current_direction_id: 0,
+        backlight_on: true,
     };
+    
+let mut ticker = Ticker::every(Duration::from_secs(10));
     esp_println::println!("Renderer ready !");
     loop {
-        let cmd = UI_CH.receive().await;
-        apply_ui_command(&mut state, cmd);
-        display.render(&state).await;
+        
+        match select(UI_CH.receive(), ticker.next()).await {
+            Either::First(cmd) => {
+                apply_ui_command(&mut state, cmd);
+                display.render(&state).await;
+            }
+            Either::Second(_) => {
+                display.healthcheck().await;
+            }
+        }
+        // let cmd = UI_CH.receive().await;
     }
 }
+
 
 // Check if the wifi link is up and if not try to connect
 #[embassy_executor::task]
@@ -353,7 +365,7 @@ async fn mqtt_connect<'a>(
     mqtt_buffer: &'a mut AllocBuffer,
     rx: &'a mut [u8; 4096],
     tx: &'a mut [u8; 4096],
-) -> Option<Client<'a, TcpSocket<'a>, AllocBuffer, 1, 1, 1>> {
+) -> Option<Client<'a, TcpSocket<'a>, AllocBuffer, 2, 8, 8>> {
     esp_println::println!("Connecting to socket...");
     let mut socket = TcpSocket::new(stack, rx, tx);
     socket.set_timeout(Some(embassy_time::Duration::from_secs(SOCKET_TIMEOUT_SECS)));
@@ -374,7 +386,7 @@ async fn mqtt_connect<'a>(
 
     esp_println::println!("Connecting to MQTT server...");
 
-    let mut mqtt_client = rust_mqtt::client::Client::<'_, _, _, 1, 1, 1>::new(mqtt_buffer);
+    let mut mqtt_client = rust_mqtt::client::Client::<'_, _, _, 2, 8, 8>::new(mqtt_buffer);
     let connect_options = ConnectOptions {
         clean_start: true,
         keep_alive: KeepAlive::Seconds(KEEP_ALIVE_SECS),
@@ -425,9 +437,18 @@ async fn mqtt_connect<'a>(
     let s = MqttString::from_slice("next-tramway/line/#").unwrap();
     let topic = unsafe { TopicName::new_unchecked(s) };
     match mqtt_client.subscribe(topic.into(), sub_options).await {
-        Ok(_) => esp_println::println!("Successfully subscribed !"),
+        Ok(_) => esp_println::println!("Successfully subscribed to line topic !"),
         Err(e) => {
-            esp_println::println!("Failed to subscribe: {:?}", e);
+            esp_println::println!("Failed to subscribe to line topic: {:?}", e);
+            return None;
+        }
+    };
+    let s2 = MqttString::from_slice("next-tramway/command/#").unwrap();
+    let topic2 = unsafe { TopicName::new_unchecked(s2) };
+    match mqtt_client.subscribe(topic2.into(), sub_options).await {
+        Ok(_) => esp_println::println!("Successfully subscribed to command topic !"),
+        Err(e) => {
+            esp_println::println!("Failed to subscribe to command topic: {:?}", e);
             return None;
         }
     };
@@ -479,11 +500,41 @@ async fn mqtt(stack: embassy_net::Stack<'static>) {
 async fn handle_mqtt_event(event: Event<'_>) {
     let Event::Publish(p) = event else { return };
     if let Ok(text) = core::str::from_utf8(p.message.as_ref()) {
-        if let Some(cmd) = parse_mqtt_event(&p.topic, text) {
-            UI_CH.send(cmd).await;
+        if p.topic.as_ref().starts_with("next-tramway/line") {
+            if let Some(cmd) = parse_mqtt_event(&p.topic, text) {
+                UI_CH.send(cmd).await;
+            } else {
+                esp_println::println!("Failed to parse MQTT event: {:?}", p);
+            }
+        } else if p.topic.as_ref().starts_with("next-tramway/command") {
+            if p.topic.as_ref() == "next-tramway/command/backlight" {
+                match text {
+                    "on" => {
+                        esp_println::println!("Received set backlight on command");
+                        UI_CH.send(UiCommand::SetBacklight(true)).await;
+                    },
+                    "off" => {
+                        esp_println::println!("Received set backlight off command");
+                        UI_CH.send(UiCommand::SetBacklight(false)).await;
+                    },
+                    _ => {
+                        esp_println::println!("Received unknown command: {}", text);
+                    }
+                }
+            } else {
+                match text {
+                    "toggle_backlight" => {
+                        esp_println::println!("Received toggle backlight command");
+                        UI_CH.send(UiCommand::ToggleBacklight).await;
+                    },
+                    _ => {
+                        esp_println::println!("Received unknown command: {}", text);
+                    }
+                }
+            }
         } else {
-            esp_println::println!("Failed to parse MQTT event: {:?}", p);
-        }
+            esp_println::println!("Unknown topic: {}", p.topic.as_ref());
+        } 
     }
 }
 

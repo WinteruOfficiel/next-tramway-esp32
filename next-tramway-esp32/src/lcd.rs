@@ -121,6 +121,7 @@ impl<'a> LcdRenderer<'a> {
 // I feel like 16x02 would be too small anyway
 impl TramDisplay for LcdRenderer<'_> {
     async fn render<'b>(&'b mut self, state: &'b crate::display::UiState) {
+        self.lcd_screen.set_backlight(state.backlight_on).await;
         if state.lines.is_empty() {
             if let Some(message) = &state.current_message {
                 self.lcd_screen.clear().await;
@@ -137,6 +138,10 @@ impl TramDisplay for LcdRenderer<'_> {
         if let Some(directions) = line.directions.get(state.current_direction_id) {
             self.render_line(&line.line,directions).await;
         }
+    }
+    
+    async fn healthcheck<'a>(&'a mut self) {
+        self.lcd_screen.check_connected().await;
     }
 }
 
@@ -163,7 +168,9 @@ pub struct Lcd<'a> {
     i2c_addr: u8,
     geom: LcdGeometry,
     curr_row: u8,
-    curr_col: u8
+    curr_col: u8,
+    backlight_on: bool,
+    is_connected: bool
 }
 
 // Source: https://cdn.sparkfun.com/assets/9/5/f/7/b/HD44780.pdf
@@ -178,11 +185,11 @@ impl<'a> Lcd<'a> {
         i2c_addr: u8,
         geom: LcdGeometry
     ) -> Self {
-        Self { i2c_addr, bus, geom, curr_row: 0, curr_col: 0 }
+        Self { i2c_addr, bus, geom, curr_row: 0, curr_col: 0, backlight_on: true, is_connected: true }
     }
 
     // set the LCD in the desired mode and initialize it, needs to be called before any other command
-    pub async fn init(&self) {
+    pub async fn init(&mut self) {
         self.set_4_bits_mode().await;
         Timer::after(Duration::from_millis(5)).await;
 
@@ -209,8 +216,14 @@ impl<'a> Lcd<'a> {
         self.curr_col = col;
     }
 
-    async fn command(&self, value: u8) {
+    async fn command(&mut self, value: u8) {
         self.send(value, 0).await;
+    }
+
+    pub async fn set_backlight(&mut self, on: bool) {
+        self.backlight_on = on;
+        // to update the backlight state, we need to send a command (it can be a no-op command since the backlight state is sent with every command)
+        self.command(0).await;
     }
 
     pub async fn print(&mut self, str: &str) {
@@ -233,41 +246,55 @@ impl<'a> Lcd<'a> {
         self.set_cursor(0,0).await;
     }
 
-    pub async fn putc(&self, c: char) {
+    pub async fn putc(&mut self, c: char) {
         self.send(c as u8, 1).await;
     }
 
-    async fn send(&self, value: u8, mode: u8) {
+    async fn send(&mut self, value: u8, mode: u8) {
         let highnib = value & 0xF0;
         let lownib = (value << 4) & 0xF0;
-        self.write_4_bits(highnib | mode | lcd_bits::BL).await;
-        self.write_4_bits(lownib | mode | lcd_bits::BL).await;
+        self.write_4_bits(highnib | mode | if self.backlight_on { lcd_bits::BL } else { 0 }).await;
+        self.write_4_bits(lownib | mode | if self.backlight_on { lcd_bits::BL } else { 0 }).await;
     }
 
     // D7 D6 D5 D4 BL EN RW RS
-    async fn write_4_bits(&self, value: u8) {
+    async fn write_4_bits(&mut self, value: u8) {
         let mut guard = self.bus.lock().await;
         let i2c = guard.as_mut().expect("I2C not initialized");
         self.write_i2c(i2c, value);
         self.pulse_enable(i2c, value).await;
     }
 
-    fn write_i2c(&self, i2c_bus: &mut I2c<'_, Blocking>, data: u8) {
+    async fn check_connected(&mut self) {
+        let mut guard = self.bus.lock().await;
+        let i2c = guard.as_mut().expect("I2C not initialized");
+        if i2c.write(self.i2c_addr, &[]).is_ok() {
+            // esp_println::println!("I2C device found at 0x{:02X}", self.i2c_addr);
+            self.is_connected = true;
+        } else {
+            esp_println::println!("I2C device not found at 0x{:02X}", self.i2c_addr);
+            self.is_connected = false;
+        }
+    }
+
+    fn write_i2c(&mut self, i2c_bus: &mut I2c<'_, Blocking>, data: u8) {
+        if !self.is_connected { return };
         let result = i2c_bus.write(self.i2c_addr, &[data]);
 
         if result.is_err() {
             esp_println::println!("Error when sending");
+            self.is_connected = false;
         }
     }
 
-    async fn pulse_enable(&self, i2c_bus: &mut I2c<'_, Blocking>, data: u8) {
+    async fn pulse_enable(&mut self, i2c_bus: &mut I2c<'_, Blocking>, data: u8) {
         self.write_i2c(i2c_bus, data | lcd_bits::EN);
         Timer::after(Duration::from_micros(1)).await;
         self.write_i2c(i2c_bus, data & !lcd_bits::EN);
         Timer::after(Duration::from_micros(50)).await;
     }
 
-    async fn set_4_bits_mode(&self) {
+    async fn set_4_bits_mode(&mut self) {
         self.write_4_bits(0x03 << 4).await;
         Timer::after(Duration::from_micros(4500)).await;
         self.write_4_bits(0x03 << 4).await;
